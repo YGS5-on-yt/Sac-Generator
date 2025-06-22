@@ -1,5 +1,6 @@
 # Sac-Generator
 Generates Sacs and checks if they are unused.
+I dont plan on updating it, Just doing this for fun whilst waiting for my friend to get back from being afk im ngl
 
 
 How it works;
