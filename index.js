@@ -1,14 +1,15 @@
 const axios = require('axios');
 const fs = require('fs').promises;
-const https = require('https');
 
 const CONFIG = {
     amount: 1000,
+    webhookUrl: '', // PUT UR OWN WEBHOOK HERE SO IT LINKS TO DISCORD MEOWWWW
     concurrency: 10,
     workingDataFile: 'working_sacs.json',
     unusedDataFile: 'unused_sacs.json',
     wordListFile: 'words.txt',
-    requestDelay: 100
+    requestDelay: 100,
+    similarWordsLimit: 10
 };
 
 class SACChecker {
@@ -19,19 +20,64 @@ class SACChecker {
         this.wordList = [];
     }
 
+    fuzzyMatch(a, b) {
+        const m = Array(b.length + 1).fill().map(() => Array(a.length + 1).fill(0));
+        for (let i = 0; i <= a.length; i++) m[0][i] = i;
+        for (let j = 0; j <= b.length; j++) m[j][0] = j;
+        for (let j = 1; j <= b.length; j++) {
+            for (let i = 1; i <= a.length; i++) {
+                const ind = a[i - 1] === b[j - 1] ? 0 : 1;
+                m[j][i] = Math.min(m[j][i - 1] + 1, m[j - 1][i] + 1, m[j - 1][i - 1] + ind);
+            }
+        }
+        return m[b.length][a.length];
+    }
+
+    simWords(inputWord) {
+        const lowInput = inputWord.toLowerCase();
+        const sims = this.wordList
+            .filter(word => {
+                const lowWord = word.toLowerCase();
+                return (
+                    lowWord.startsWith(lowInput.slice(0, 3)) ||
+                    this.fuzzyMatch(lowInput, lowWord) <= 2
+                ) &&
+                word.length >= 3 &&
+                word.length <= 10 &&
+                word.trim() &&
+                !this.checkedSacs.has(word);
+            })
+            .slice(0, CONFIG.similarWordsLimit);
+        if (
+            inputWord.length >= 3 &&
+            inputWord.length <= 10 &&
+            inputWord.trim() &&
+            !this.checkedSacs.has(inputWord)
+        ) {
+            sims.unshift(inputWord);
+        }
+        return [...new Set(sims)];
+    }
+
+    async sendHook(msg, embeds = []) {
+        try {
+            await axios.post(CONFIG.webhookUrl, { content: msg, embeds });
+        } catch (error) {
+            console.error('Failed to send Discord webhook notification:', error.message);
+        }
+    }
+
     async downloadWordList() {
-        return new Promise((resolve) => {
-            https.get('https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt', (response) => {
-                let data = '';
-                response.on('data', chunk => data += chunk);
-                response.on('end', () => {
-                    this.wordList = data.split('\n').map(word => word.replace(/\r/g, '')).filter(word => 
-                        word.length >= 3 && word.length <= 10 && word.trim()
-                    );
-                    resolve();
-                });
-            });
-        });
+        try {
+            const response = await axios.get('https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt');
+            this.wordList = response.data.split('\n').map(word => word.replace(/\r/g, '')).filter(word => 
+                word.length >= 3 && word.length <= 10 && word.trim()
+            );
+            return Promise.resolve();
+        } catch (error) {
+            console.error('Failed to download word list:', error.message);
+            throw error;
+        }
     }
 
     async loadWordList() {
@@ -71,7 +117,7 @@ class SACChecker {
         if (this.checkedSacs.has(sac)) return;
         this.checkedSacs.add(sac);
         try {
-            const response = await axios.get(`https://fortnite-api.com/v2/creatorcode?name=${sac}`, { timeout: 5000 });
+            const response = await axios.get(`https://fortnite-api.com/v2/creatorcode?name=${encodeURIComponent(sac)}`, { timeout: 5000 });
             if (response.data?.data) {
                 this.workingSacs.add(sac);
             } else {
@@ -93,24 +139,41 @@ class SACChecker {
         return Array.from(sacs);
     }
 
-    async run() {
+    async run(inputWord = null) {
         await this.loadWordList();
         await this.loadData();
-        const totalSacs = this.generateUniqueSacs(CONFIG.amount);
-        let processed = 0;
+        let totalSacs;
+        let message;
+        if (inputWord) {
+            totalSacs = this.simWords(inputWord);
+            message = `Checking SAC "${inputWord}" and ${totalSacs.length - 1} similar words`;
+        } else {
+            totalSacs = this.generateUniqueSacs(CONFIG.amount);
+            message = `Starting SAC Checker for ${CONFIG.amount} random SACs`;
+        }
+        await this.sendHook(null, [{
+            title: 'SAC Check Started',
+            description: message,
+            color: 0x00ff00,
+            timestamp: new Date().toISOString()
+        }]);
         for (let i = 0; i < totalSacs.length; i += CONFIG.concurrency) {
             const batch = totalSacs.slice(i, i + CONFIG.concurrency);
             await Promise.all(batch.map(sac => this.checkSac(sac)));
-            processed += batch.length;
-            if (processed % (CONFIG.concurrency * 5) === 0) {
-                await this.saveData();
-            }
+            await this.saveData();
             if (i + CONFIG.concurrency < totalSacs.length) {
                 await new Promise(resolve => setTimeout(resolve, CONFIG.requestDelay));
             }
         }
         await this.saveData();
+        await this.sendHook('SAC Checking Complete!', [{
+            title: 'Final Results',
+            description: `Total SACs Checked: ${totalSacs.length}\nWorking SACs Found: ${this.workingSacs.size}\nUnused SACs: ${this.unusedSacs.size}`,
+            color: 0xff0000,
+            timestamp: new Date().toISOString()
+        }]);
     }
 }
 
-new SACChecker().run().catch(console.error);
+const inputWord = process.argv[2];
+new SACChecker().run(inputWord).catch(console.error);
